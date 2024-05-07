@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: chatbot-java
+
+app:
+  openai:
+    api:
+      key: ${OPENAI_API_KEY}
