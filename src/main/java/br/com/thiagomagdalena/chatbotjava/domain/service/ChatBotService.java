@@ -5,6 +5,8 @@ import br.com.thiagomagdalena.chatbotjava.infra.openai.OpenAIClient;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+
 @Service
 @RequiredArgsConstructor
 public class ChatBotService {
@@ -17,4 +19,13 @@ public class ChatBotService {
         return openAIClient.enviarRequisicaoChatCompletion(dados);
 
     }
+
+    public List<String> carregarHistorico() {
+        return openAIClient.carregarHistoricoDeMensagens();
+    }
+
+    public void limparHistorico() {
+        openAIClient.apagarThread();
+    }
+
 }
