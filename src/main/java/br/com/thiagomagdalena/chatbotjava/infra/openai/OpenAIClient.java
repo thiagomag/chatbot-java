@@ -1,34 +1,41 @@
 package br.com.thiagomagdalena.chatbotjava.infra.openai;
 
+import br.com.thiagomagdalena.chatbotjava.domain.DadosCalculoFrete;
+import br.com.thiagomagdalena.chatbotjava.domain.service.CalculadorDeFrete;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.theokanning.openai.completion.chat.ChatFunction;
+import com.theokanning.openai.completion.chat.ChatFunctionCall;
 import com.theokanning.openai.completion.chat.ChatMessageRole;
 import com.theokanning.openai.messages.Message;
 import com.theokanning.openai.messages.MessageRequest;
+import com.theokanning.openai.runs.Run;
 import com.theokanning.openai.runs.RunCreateRequest;
+import com.theokanning.openai.runs.SubmitToolOutputRequestItem;
+import com.theokanning.openai.runs.SubmitToolOutputsRequest;
+import com.theokanning.openai.service.FunctionExecutor;
 import com.theokanning.openai.service.OpenAiService;
 import com.theokanning.openai.threads.ThreadRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
 
 @Component
 public class OpenAIClient {
 
-    private final String apiKey;
     private final OpenAiService service;
     private final String assistantId;
     private String threadId;
+    private final CalculadorDeFrete calculadorDeFrete;
 
 
     public OpenAIClient(@Value("${app.openai.api.key}") String apiKey,
-                        @Value("${app.openai.assistant.id}") String assistantId) {
-        this.apiKey = apiKey;
+                        @Value("${app.openai.assistant.id}") String assistantId,
+                        CalculadorDeFrete calculadorDeFrete) {
         this.service = new OpenAiService(apiKey, Duration.ofSeconds(60));
         this.assistantId = assistantId;
+        this.calculadorDeFrete = calculadorDeFrete;
     }
 
     public String enviarRequisicaoChatCompletion(DadosRequisicaoChatCompletion dados) {
@@ -41,7 +48,7 @@ public class OpenAIClient {
         if (this.threadId == null) {
             var threadRequest = ThreadRequest
                     .builder()
-                    .messages(Arrays.asList(messageRequest))
+                    .messages(Collections.singletonList(messageRequest))
                     .build();
 
             var thread = service.createThread(threadRequest);
@@ -56,21 +63,55 @@ public class OpenAIClient {
                 .build();
         var run = service.createRun(threadId, runRequest);
 
+        var concluido = false;
+        var precisaChamarFuncao = false;
         try {
-            while (!run.getStatus().equalsIgnoreCase("completed")) {
+            while (!concluido && !precisaChamarFuncao) {
                 Thread.sleep(1000 * 10);
                 run = service.retrieveRun(threadId, run.getId());
+                concluido = run.getStatus().equalsIgnoreCase("completed");
+                precisaChamarFuncao = run.getRequiredAction() != null;
             }
-        } catch (Exception e) {
+        } catch (InterruptedException e) {
             throw new RuntimeException(e);
+        }
+
+        if (precisaChamarFuncao) {
+            var precoDoFrete = chamarFuncao(run);
+            var submitRequest = SubmitToolOutputsRequest
+                    .builder()
+                    .toolOutputs(List.of(
+                            new SubmitToolOutputRequestItem(
+                                    run
+                                            .getRequiredAction()
+                                            .getSubmitToolOutputs()
+                                            .getToolCalls()
+                                            .get(0)
+                                            .getId(),
+                                    precoDoFrete)
+                    ))
+                    .build();
+            service.submitToolOutputs(threadId, run.getId(), submitRequest);
+
+            try {
+                while (!concluido) {
+                    Thread.sleep(1000 * 10);
+                    run = service.retrieveRun(threadId, run.getId());
+                    concluido = run.getStatus().equalsIgnoreCase("completed");
+                }
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         var mensagens = service.listMessages(threadId);
         return mensagens
                 .getData()
-                .stream().max(Comparator.comparing(Message::getCreatedAt))
-                .get().getContent().get(0).getText().getValue();
+                .stream().max(Comparator.comparingInt(Message::getCreatedAt))
+                .get().getContent().get(0).getText().getValue()
+                .replaceAll("【.*?】", "");
     }
+
 
     public List<String> carregarHistoricoDeMensagens() {
         var mensagens = new ArrayList<String>();
@@ -94,6 +135,22 @@ public class OpenAIClient {
         if (this.threadId != null) {
             service.deleteThread(this.threadId);
             this.threadId = null;
+        }
+    }
+
+    private String chamarFuncao(Run run) {
+        try {
+            var funcao = run.getRequiredAction().getSubmitToolOutputs().getToolCalls().get(0).getFunction();
+            var funcaoCalcularFrete = ChatFunction.builder()
+                    .name("calcularFrete")
+                    .executor(DadosCalculoFrete.class, calculadorDeFrete::calcular)
+                    .build();
+
+            var executorDeFuncoes = new FunctionExecutor(Collections.singletonList(funcaoCalcularFrete));
+            var functionCall = new ChatFunctionCall(funcao.getName(), new ObjectMapper().readTree(funcao.getArguments()));
+            return executorDeFuncoes.execute(functionCall).toString();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
